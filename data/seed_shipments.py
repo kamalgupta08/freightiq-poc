@@ -130,19 +130,23 @@ def make_shipment(i):
     }
 
 
-def main(n=320):
-    os.makedirs(os.path.join(ROOT, "db"), exist_ok=True)
-    fresh = not os.path.exists(DB_PATH)
-    conn = sqlite3.connect(DB_PATH)
+def main(n=320, db_path=None, force=False):
+    """db_path defaults to the module-level DB_PATH (db/freight.db next to
+    this script). Passing an explicit db_path lets app.py call this directly
+    to seed a runtime copy on a hosting platform, with no dependency on a
+    binary .db file having survived a git push intact."""
+    db_path = db_path or DB_PATH
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    conn = sqlite3.connect(db_path)
     with open(SCHEMA_PATH) as f:
         conn.executescript(f.read())
 
     count = conn.execute("SELECT COUNT(*) FROM shipments").fetchone()[0]
-    if count > 0:
+    if count > 0 and not force:
         print(f"shipments table already has {count} rows -- skipping reseed. "
-              f"Delete db/freight.db to regenerate from scratch.")
+              f"Delete {db_path} to regenerate from scratch.")
         conn.close()
-        return
+        return db_path
 
     rows = [make_shipment(i) for i in range(1, n + 1)]
     cols = list(rows[0].keys())
@@ -152,8 +156,9 @@ def main(n=320):
         [tuple(r[c] for c in cols) for r in rows],
     )
     conn.commit()
-    print(f"Seeded {n} shipments into {DB_PATH}")
+    print(f"Seeded {n} shipments into {db_path}")
     conn.close()
+    return db_path
 
 
 if __name__ == "__main__":
