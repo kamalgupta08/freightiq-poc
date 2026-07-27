@@ -5,8 +5,10 @@ Streamlit POC for GoComet Agentic AI PM assignment, Part 1.
 Run: streamlit run app.py
 """
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime
 
 import pandas as pd
@@ -19,10 +21,51 @@ from agents.analytics_agent import run_agentic_query
 from agents.document_agent import extract_invoice, store_invoice, render_to_images
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(ROOT, "db", "freight.db")
+BUNDLED_DB_PATH = os.path.join(ROOT, "db", "freight.db")
 SAMPLE_DIR = os.path.join(ROOT, "data", "sample_invoices")
 
 st.set_page_config(page_title="FreightIQ | Agentic Freight Intelligence", page_icon="🚢", layout="wide")
+
+
+def _is_valid_sqlite_db(path, required_table="shipments"):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return False
+    try:
+        conn = sqlite3.connect(path)
+        conn.execute(f"SELECT COUNT(*) FROM {required_table}")
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_resource
+def get_writable_db_path():
+    """Some hosting platforms (e.g. Streamlit Community Cloud) check out the
+    repo onto a mounted/read-only-ish filesystem that doesn't support the
+    file locking SQLite needs, even for plain reads -- it throws
+    sqlite3.OperationalError on a simple SELECT. Work around this by copying
+    the bundled DB into the local temp directory once per session and using
+    that copy for the rest of the app. This is a no-op in practice on a
+    normal local machine; it just adds one file copy at startup.
+
+    Self-healing: if a previous run left a partial/corrupt copy at the
+    runtime path (e.g. an interrupted deploy), re-copy rather than trusting
+    file existence alone."""
+    runtime_dir = os.path.join(tempfile.gettempdir(), "freightiq_runtime")
+    os.makedirs(runtime_dir, exist_ok=True)
+    runtime_db = os.path.join(runtime_dir, "freight.db")
+    if not _is_valid_sqlite_db(runtime_db):
+        shutil.copy(BUNDLED_DB_PATH, runtime_db)
+        # shutil.copy preserves the source file's permission bits -- if the
+        # bundled DB was checked out read-only (as on some hosting
+        # platforms), the "writable" copy would silently inherit that and
+        # every store attempt would fail. Force it writable explicitly.
+        os.chmod(runtime_db, 0o664)
+    return runtime_db
+
+
+DB_PATH = get_writable_db_path()
 
 
 # ---------------------------------------------------------------------------
