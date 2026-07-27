@@ -1,0 +1,6 @@
+streamlit>=1.38
+anthropic>=0.40
+pandas>=2.0
+pymupdf>=1.24
+pillow>=10.0
+reportlab>=4.0
