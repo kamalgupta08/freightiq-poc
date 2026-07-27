@@ -49,19 +49,33 @@ def get_writable_db_path():
     that copy for the rest of the app. This is a no-op in practice on a
     normal local machine; it just adds one file copy at startup.
 
-    Self-healing: if a previous run left a partial/corrupt copy at the
-    runtime path (e.g. an interrupted deploy), re-copy rather than trusting
-    file existence alone."""
+    Self-healing, two layers deep:
+      1. If the runtime copy is missing/corrupt, re-copy from the bundled
+         db/freight.db (fast path).
+      2. If the *bundled* db is itself missing or doesn't have the expected
+         table -- e.g. the binary .db file didn't survive a git push intact,
+         which is a real failure mode on some platforms/workflows -- seed a
+         fresh database directly from data/seed_shipments.py instead. That
+         script is pure Python + a fixed random seed, so it needs nothing
+         but code that's already in the repo, with no binary-file transfer
+         risk at all."""
     runtime_dir = os.path.join(tempfile.gettempdir(), "freightiq_runtime")
     os.makedirs(runtime_dir, exist_ok=True)
     runtime_db = os.path.join(runtime_dir, "freight.db")
+
     if not _is_valid_sqlite_db(runtime_db):
-        shutil.copy(BUNDLED_DB_PATH, runtime_db)
-        # shutil.copy preserves the source file's permission bits -- if the
-        # bundled DB was checked out read-only (as on some hosting
-        # platforms), the "writable" copy would silently inherit that and
-        # every store attempt would fail. Force it writable explicitly.
-        os.chmod(runtime_db, 0o664)
+        if _is_valid_sqlite_db(BUNDLED_DB_PATH):
+            shutil.copy(BUNDLED_DB_PATH, runtime_db)
+            # shutil.copy preserves the source file's permission bits -- if
+            # the bundled DB was checked out read-only (as on some hosting
+            # platforms), the "writable" copy would silently inherit that
+            # and every store attempt would fail. Force it writable.
+            os.chmod(runtime_db, 0o664)
+        else:
+            sys.path.insert(0, os.path.join(ROOT, "data"))
+            import seed_shipments
+            seed_shipments.main(n=320, db_path=runtime_db, force=True)
+
     return runtime_db
 
 
