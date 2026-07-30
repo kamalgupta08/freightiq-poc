@@ -20,7 +20,7 @@ changes between mock and live mode -- only which client answers the
 """
 import os
 
-MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929")
+MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
 
 def get_client():

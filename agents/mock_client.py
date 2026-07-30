@@ -84,6 +84,86 @@ def _mock_extract_invoice(user_text):
 
 
 # ---------------------------------------------------------------------------
+# Part 2: SU trade-document extraction stubs (see data/generate_sample_trade_docs.py)
+# ---------------------------------------------------------------------------
+CANNED_TRADE_DOC_EXTRACTIONS = {
+    "SU_TRADEDOC_GC-2026-00004": dict(
+        consignee_name="Meridian FMCG Group", hs_code="1904.10",
+        port_of_loading="Nhava Sheva", port_of_discharge="Jebel Ali", incoterm="CIF",
+        description_of_goods="Breakfast cereal products, retail-packed cartons",
+        weight_kg=14884.6,
+        field_confidence={"consignee_name": 0.97, "hs_code": 0.95, "port_of_loading": 0.96,
+                           "port_of_discharge": 0.96, "incoterm": 0.98,
+                           "description_of_goods": 0.93, "weight_kg": 0.95},
+        low_confidence_fields=[],
+    ),
+    "SU_TRADEDOC_GC-2026-00009": dict(
+        consignee_name="Meridian FMC Group Pvt Ltd", hs_code="1904.20",
+        port_of_loading="Nhava Sheva", port_of_discharge="Antwerp", incoterm="FOB",
+        description_of_goods="Cereal-based snack products, cartons",
+        weight_kg=18500.0,
+        field_confidence={"consignee_name": 0.94, "hs_code": 0.92, "port_of_loading": 0.95,
+                           "port_of_discharge": 0.93, "incoterm": 0.96,
+                           "description_of_goods": 0.55, "weight_kg": 0.91},
+        low_confidence_fields=["description_of_goods"],
+    ),
+}
+
+
+def _mock_extract_trade_doc(user_text):
+    m = re.search(r"Filename:\s*([^\n|]+)", user_text)
+    if m:
+        stem = m.group(1).strip()
+        for key in CANNED_TRADE_DOC_EXTRACTIONS:
+            if key in stem:
+                return CANNED_TRADE_DOC_EXTRACTIONS[key]
+    return dict(
+        consignee_name="Unknown", hs_code="Unknown", port_of_loading="Unknown",
+        port_of_discharge="Unknown", incoterm="Unknown",
+        description_of_goods="Unable to read document clearly", weight_kg=0.0,
+        field_confidence={"consignee_name": 0.3, "hs_code": 0.3, "port_of_loading": 0.3,
+                           "port_of_discharge": 0.3, "incoterm": 0.3,
+                           "description_of_goods": 0.3, "weight_kg": 0.3},
+        low_confidence_fields=["consignee_name", "hs_code", "port_of_loading",
+                                "port_of_discharge", "incoterm", "description_of_goods", "weight_kg"],
+    )
+
+
+def _mock_draft_reply(user_text):
+    """No-tools text completion: parse the verification JSON + overall_status
+    embedded in the prompt and generate a grounded (not hallucinated) email
+    from the actual field results, mirroring what a real model is asked to do."""
+    status_m = re.search(r"Overall status:\s*(\w+)", user_text)
+    overall_status = status_m.group(1) if status_m else "issues"
+    json_m = re.search(r"Verification results \(JSON\):\s*(\[.*?\])\s*\n", user_text, re.DOTALL)
+    try:
+        field_results = json.loads(json_m.group(1)) if json_m else []
+    except Exception:
+        field_results = []
+    shipment_m = re.search(r"shipment\s+(GC-[\w-]+)", user_text)
+    shipment_id = shipment_m.group(1) if shipment_m else "the referenced shipment"
+
+    if overall_status == "clean":
+        return (
+            f"Hi,\n\nThanks for sending over the documentation for shipment {shipment_id}. "
+            f"We've reviewed the Commercial Invoice & Packing List and all fields check out against "
+            f"the customer's requirements (consignee, HS code, ports, Incoterm, weight, and goods "
+            f"description all match).\n\nThis is cleared to proceed to the customer. No action needed "
+            f"on your end.\n\nBest,\nCG Team"
+        )
+
+    lines = [f"Hi,\n\nWe've reviewed the documentation for shipment {shipment_id} and found the "
+              f"following that needs correcting before we can clear this to the customer:\n"]
+    for f in field_results:
+        if f.get("status") in ("mismatch", "uncertain"):
+            tag = "MISMATCH" if f["status"] == "mismatch" else "NEEDS VERIFICATION"
+            lines.append(f"- [{tag}] {f['field']}: found \"{f['found']}\", expected \"{f['expected']}\". {f.get('note', '')}")
+    lines.append("\nPlease resend corrected documentation at your earliest convenience so we can "
+                  "re-verify and release to the customer.\n\nBest,\nCG Team")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Analytics NL -> SQL rules (mock mode only)
 # ---------------------------------------------------------------------------
 RULES = [
@@ -140,6 +220,16 @@ RULES = [
      "SELECT mode, carrier, ROUND(SUM(quoted_cost_usd),2) AS total_quoted_cost_usd, COUNT(*) AS n_shipments "
      "FROM shipments GROUP BY mode, carrier ORDER BY mode, total_quoted_cost_usd DESC LIMIT 30",
      "Total quoted cost broken down by mode and carrier (follow-up refinement)."),
+
+    (["discrepanc", "flagged", "amendment", "issues found", "came back with issues"],
+     "SELECT verification_id, shipment_id, su_sender, fields_mismatched, fields_uncertain, cg_action "
+     "FROM verifications WHERE overall_status='issues' ORDER BY created_at DESC LIMIT 50",
+     "Verification runs that came back with discrepancies (amendment required)."),
+
+    (["verification", "su documents", "trade doc"],
+     "SELECT verification_id, shipment_id, su_sender, overall_status, fields_mismatched, "
+     "fields_uncertain, cg_action FROM verifications ORDER BY created_at DESC LIMIT 50",
+     "All SU document verification runs (Part 2), most recent first."),
 ]
 
 CLARIFY_TRIGGERS = [
@@ -192,6 +282,22 @@ class _Messages:
                 name="extract_invoice_fields", input=fields,
             )
             return Response([block], "tool_use")
+
+        # --- Part 2: trade-document extraction path ----------------------
+        if "extract_trade_doc_fields" in tool_names:
+            user_text = _last_user_text(messages)
+            fields = _mock_extract_trade_doc(user_text)
+            block = Block(
+                "tool_use", id=f"toolu_{uuid.uuid4().hex[:12]}",
+                name="extract_trade_doc_fields", input=fields,
+            )
+            return Response([block], "tool_use")
+
+        # --- Part 2: plain-text reply drafting (no tools at all) ---------
+        if not tools:
+            user_text = _last_user_text(messages)
+            text = _mock_draft_reply(user_text)
+            return Response([Block("text", text=text)], "end_turn")
 
         # --- Analytics path ----------------------------------------------
         last_tool_result = _find_last_tool_result(messages)

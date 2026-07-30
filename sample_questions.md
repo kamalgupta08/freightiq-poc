@@ -40,3 +40,11 @@ question about the schema should work, including rephrasings and questions not l
 Questions 11-13 return zero rows until at least one document has been extracted and stored --
 that's the intended behaviour, not a bug: it's the proof that Flow A and Flow B are actually
 connected through the same store rather than being two disconnected demos.
+
+## Bonus -- Part 2 linkage (run after processing at least one SU email in the Verification tab)
+
+14. Show me all the SU document verifications that came back with discrepancies
+15. Show me all the SU document verifications
+
+These pull from the `verifications` table Part 2 adds, through the exact same analytics agent
+and guardrails as questions 1-13 -- no separate system.

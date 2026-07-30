@@ -14,7 +14,7 @@ Layered defense (any single layer failing does not expose write access):
 import re
 import sqlite3
 
-ALLOWED_TABLES = {"shipments", "invoices"}
+ALLOWED_TABLES = {"shipments", "invoices", "verifications"}
 DENYLIST = [
     "insert", "update", "delete", "drop", "alter", "attach", "detach",
     "pragma", "create", "replace", "vacuum", "trigger", "exec", "grant",

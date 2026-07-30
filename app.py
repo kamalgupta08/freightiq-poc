@@ -19,10 +19,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from agents.llm_client import get_client, MODEL
 from agents.analytics_agent import run_agentic_query
 from agents.document_agent import extract_invoice, store_invoice, render_to_images
+from agents.verification_agent import (
+    MOCK_INBOX, CUSTOMER_RULES, get_shipment_row, extract_trade_doc, compare_fields,
+    draft_reply_email, store_verification, mark_sent,
+)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 BUNDLED_DB_PATH = os.path.join(ROOT, "db", "freight.db")
 SAMPLE_DIR = os.path.join(ROOT, "data", "sample_invoices")
+SU_DOCS_DIR = os.path.join(ROOT, "data", "sample_su_docs")
 
 st.set_page_config(page_title="FreightIQ | Agentic Freight Intelligence", page_icon="🚢", layout="wide")
 
@@ -162,8 +167,8 @@ with st.sidebar:
 st.title("🚢 FreightIQ")
 st.caption("An agentic analytics + document intelligence layer for freight operations data.")
 
-tab_analytics, tab_docs, tab_about = st.tabs(
-    ["📊 Agentic Analytics", "📄 Vision Document Agent", "ℹ️ About this POC"]
+tab_analytics, tab_docs, tab_verify, tab_about = st.tabs(
+    ["📊 Agentic Analytics", "📄 Vision Document Agent", "📥 SU → CG Verification (Part 2)", "ℹ️ About this POC"]
 )
 
 # ---------------------------------------------------------------------------
@@ -279,27 +284,35 @@ with tab_docs:
                 st.warning(f"Low-confidence fields flagged for review: {', '.join(low_conf)}")
             st.progress(min(max(conf, 0.0), 1.0), text=f"Model confidence: {conf:.0%}")
 
-            with st.form("review_form"):
+            # Every widget key is scoped to `filename` -- without this, Streamlit
+            # treats same-label widgets across different documents as the *same*
+            # widget and keeps stale values from whichever document was reviewed
+            # first, silently re-storing the wrong data when you switch documents.
+            fk = lambda name: f"{name}__{filename}"
+            with st.form(f"review_form__{filename}"):
                 c1, c2 = st.columns(2)
-                invoice_number = c1.text_input("Invoice number", fields.get("invoice_number") or "")
+                invoice_number = c1.text_input("Invoice number", fields.get("invoice_number") or "",
+                                                key=fk("invoice_number"))
                 shipment_reference = c2.text_input(
                     "Shipment reference" + (" ⚠️" if "shipment_reference" in low_conf else ""),
-                    fields.get("shipment_reference") or "")
-                carrier = c1.text_input("Carrier", fields.get("carrier") or "")
-                currency = c2.text_input("Currency", fields.get("currency") or "USD")
-                invoice_date = c1.text_input("Invoice date", fields.get("invoice_date") or "")
-                due_date = c2.text_input("Due date", fields.get("due_date") or "")
-                freight_charges = c1.number_input("Freight charges", value=float(fields.get("freight_charges") or 0))
-                fuel_surcharge = c2.number_input("Fuel surcharge", value=float(fields.get("fuel_surcharge") or 0))
+                    fields.get("shipment_reference") or "", key=fk("shipment_reference"))
+                carrier = c1.text_input("Carrier", fields.get("carrier") or "", key=fk("carrier"))
+                currency = c2.text_input("Currency", fields.get("currency") or "USD", key=fk("currency"))
+                invoice_date = c1.text_input("Invoice date", fields.get("invoice_date") or "", key=fk("invoice_date"))
+                due_date = c2.text_input("Due date", fields.get("due_date") or "", key=fk("due_date"))
+                freight_charges = c1.number_input("Freight charges", value=float(fields.get("freight_charges") or 0),
+                                                   key=fk("freight_charges"))
+                fuel_surcharge = c2.number_input("Fuel surcharge", value=float(fields.get("fuel_surcharge") or 0),
+                                                  key=fk("fuel_surcharge"))
                 customs_duty = c1.number_input(
                     "Customs duty" + (" ⚠️" if "customs_duty" in low_conf else ""),
-                    value=float(fields.get("customs_duty") or 0))
+                    value=float(fields.get("customs_duty") or 0), key=fk("customs_duty"))
                 other_charges = c2.number_input(
                     "Other charges" + (" ⚠️" if "other_charges" in low_conf else ""),
-                    value=float(fields.get("other_charges") or 0))
+                    value=float(fields.get("other_charges") or 0), key=fk("other_charges"))
                 total_amount = st.number_input(
                     "Total amount" + (" ⚠️" if "total_amount" in low_conf else ""),
-                    value=float(fields.get("total_amount") or 0))
+                    value=float(fields.get("total_amount") or 0), key=fk("total_amount"))
 
                 submitted = st.form_submit_button("Confirm & store (makes this queryable)", type="primary")
                 if submitted:
@@ -329,7 +342,130 @@ with tab_docs:
     st.dataframe(df_inv, width='stretch')
 
 # ---------------------------------------------------------------------------
-# TAB 3 -- About
+# TAB 3 -- Part 2: SU -> CG Document Verification
+# ---------------------------------------------------------------------------
+STATUS_ICON = {"match": "✅", "mismatch": "❌", "uncertain": "⚠️"}
+
+with tab_verify:
+    st.subheader("SU → CG Document Verification")
+    st.caption(
+        "Applies Part 1's vision extraction + storage to a real workflow: SU submits a trade "
+        "document by email, the agent extracts and checks it against the customer's requirements "
+        "(pulling expected port/weight straight from the original booking in `shipments`), flags "
+        "discrepancies, and drafts a reply. CG always reviews and sends -- the agent never sends."
+    )
+
+    if "verify_state" not in st.session_state:
+        st.session_state.verify_state = {}  # email_id -> {results, draft, verification_id, overall_status, sent, final_email}
+
+    st.markdown("#### 1 · Incoming")
+    for email in MOCK_INBOX:
+        state = st.session_state.verify_state.get(email["email_id"])
+        with st.container(border=True):
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                badge = "🟢 Processed" if state else "🆕 New"
+                if state and state.get("sent"):
+                    badge = "✅ Sent"
+                st.markdown(f"**{email['subject']}**  ·  {badge}")
+                st.caption(f"From: {email['from_name']} <{email['from']}>  ·  {email['received_at']}")
+                st.write(email["body"])
+                st.caption(f"📎 Attachment: {email['attachment']}  ·  Shipment: {email['shipment_id']}")
+            with c2:
+                st.write("")
+                process_clicked = st.button(
+                    "Re-process" if state else "Process with agent",
+                    key=f"process__{email['email_id']}", type="primary" if not state else "secondary",
+                    width='stretch',
+                )
+
+            if process_clicked:
+                with st.spinner("Agent processing: extracting fields, comparing against customer requirements..."):
+                    shipment = get_shipment_row(DB_PATH, email["shipment_id"])
+                    doc_path = os.path.join(SU_DOCS_DIR, email["attachment"])
+                    with open(doc_path, "rb") as f:
+                        file_bytes = f.read()
+                    fields, is_mock, err = extract_trade_doc(file_bytes, email["attachment"])
+                    if err:
+                        st.error(f"Extraction failed: {err}")
+                    else:
+                        results = compare_fields(fields, shipment, CUSTOMER_RULES)
+                        overall_status = "issues" if any(r["status"] != "match" for r in results) else "clean"
+                        draft, _ = draft_reply_email(email["shipment_id"], email["from"], results, overall_status)
+                        verification_id, _ = store_verification(
+                            DB_PATH, email["shipment_id"], email["from"], email["subject"],
+                            email["attachment"], results, draft,
+                        )
+                        st.session_state.verify_state[email["email_id"]] = {
+                            "results": results, "draft": draft, "verification_id": verification_id,
+                            "overall_status": overall_status, "sent": False, "final_email": None,
+                            "shipment": shipment,
+                        }
+                st.rerun()
+
+            if state:
+                st.markdown("---")
+                st.markdown("#### 2 · Verification Result")
+                status_label = "✅ Clean -- all fields match" if state["overall_status"] == "clean"                     else f"⚠️ Issues found -- {sum(1 for r in state['results'] if r['status']=='mismatch')} mismatch(es), "                          f"{sum(1 for r in state['results'] if r['status']=='uncertain')} uncertain"
+                st.markdown(f"**{status_label}**")
+                df_results = pd.DataFrame([
+                    {
+                        "": STATUS_ICON[r["status"]],
+                        "Field": r["field"],
+                        "Found": str(r["found"]),
+                        "Expected": str(r["expected"]),
+                        "Confidence": f"{r['confidence']:.0%}",
+                        "Status": r["status"],
+                    }
+                    for r in state["results"]
+                ])
+                st.dataframe(df_results, width='stretch', hide_index=True)
+
+                flagged = [r for r in state["results"] if r["status"] != "match"]
+                if flagged:
+                    st.markdown("#### 3 · Discrepancy Detail")
+                    st.caption("Click a flagged field to see what was found vs. what was expected, and why.")
+                    for r in flagged:
+                        with st.expander(f"{STATUS_ICON[r['status']]} {r['field']} -- {r['status']}"):
+                            dc1, dc2 = st.columns(2)
+                            dc1.metric("Found on document", str(r["found"]))
+                            dc2.metric("Expected", str(r["expected"]))
+                            st.write(r["note"] or "No additional detail.")
+                            st.caption(f"Extraction confidence for this field: {r['confidence']:.0%}")
+
+                st.markdown("#### 4 · Draft Reply")
+                st.caption("Agent-generated. Edit freely before sending -- the agent never sends on its own.")
+                draft_key = f"draft_email__{email['email_id']}"
+                edited_email = st.text_area(
+                    "Reply to SU", value=state["final_email"] or state["draft"], height=220, key=draft_key,
+                )
+                bcol1, bcol2 = st.columns([1, 4])
+                with bcol1:
+                    if not state["sent"]:
+                        if st.button("CG: Approve & Send", key=f"send__{email['email_id']}", type="primary"):
+                            mark_sent(DB_PATH, state["verification_id"], edited_email)
+                            st.session_state.verify_state[email["email_id"]]["sent"] = True
+                            st.session_state.verify_state[email["email_id"]]["final_email"] = edited_email
+                            st.rerun()
+                    else:
+                        st.success("Sent to SU ✅")
+
+    st.markdown("---")
+    st.markdown("#### Verification log (queryable via Analytics tab)")
+    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    df_log = pd.read_sql_query(
+        "SELECT verification_id, shipment_id, su_sender, overall_status, fields_matched, "
+        "fields_mismatched, fields_uncertain, cg_action, created_at, sent_at "
+        "FROM verifications ORDER BY created_at DESC", conn)
+    conn.close()
+    st.dataframe(df_log, width='stretch', hide_index=True)
+    st.caption(
+        "Try in the Analytics tab: \"Show me all the SU document verifications that came back with "
+        "discrepancies\" -- this table is queried by the exact same agent as Part 1, no separate system."
+    )
+
+# ---------------------------------------------------------------------------
+# TAB 4 -- About
 # ---------------------------------------------------------------------------
 with tab_about:
     st.markdown(

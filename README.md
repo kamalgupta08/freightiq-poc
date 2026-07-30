@@ -1,6 +1,12 @@
 # FreightIQ -- Agentic Analytics + Vision Document Intelligence
 
-GoComet Agentic AI PM assignment, Part 1. A working POC combining:
+GoComet Agentic AI PM assignment, **Part 1 + Part 2**, in one repo. Part 2 is not a separate
+app -- it's the same agents, database and guardrails from Part 1, applied to a real workflow
+(see "Part 2" section below).
+
+## Part 1 -- Build the Foundation
+
+A working POC combining:
 
 - **Agentic Analytics Layer** -- ask a question in natural language about freight shipments,
   get a grounded answer, the SQL used, a result table, and a chart. Supports multi-turn
@@ -24,13 +30,15 @@ pip install -r requirements.txt
 cp .env.example .env
 # edit .env and set ANTHROPIC_API_KEY
 
-python3 data/seed_shipments.py          # generates db/freight.db (320 synthetic shipments)
-python3 data/generate_sample_invoices.py # generates data/sample_invoices/*.pdf (4 sample docs)
+python3 data/seed_shipments.py                # generates db/freight.db (320 synthetic shipments)
+python3 data/generate_sample_invoices.py      # generates data/sample_invoices/*.pdf (4 sample docs, Part 1)
+python3 data/generate_sample_trade_docs.py    # generates data/sample_su_docs/*.pdf (2 sample docs, Part 2)
 
 streamlit run app.py
 ```
 
-Then open the URL Streamlit prints (typically http://localhost:8501).
+Then open the URL Streamlit prints (typically http://localhost:8501). All three tabs (Analytics,
+Vision Document Agent, SU -> CG Verification) are in the same app -- Part 2 is the third tab.
 
 ## Demo mode vs live mode
 
@@ -53,22 +61,28 @@ tells you which mode you're in.
 ## Project structure
 
 ```
-app.py                          Streamlit UI (analytics tab, document tab, about tab)
-schema.sql                      SQLite schema: shipments + invoices
+app.py                          Streamlit UI: Analytics tab, Document Agent tab,
+                                 SU -> CG Verification tab (Part 2), About tab
+schema.sql                      SQLite schema: shipments + invoices + verifications
 agents/
   llm_client.py                 Picks real Anthropic client or MockClient based on env
   mock_client.py                Deterministic offline stand-in (see above)
-  analytics_agent.py             Tool-use loop: run_sql / ask_clarification
+  analytics_agent.py            Tool-use loop: run_sql / ask_clarification
   sql_guard.py                  SELECT-only / allowlist / row-cap / read-only enforcement
-  document_agent.py             Vision extraction (forced structured tool call) + storage
+  document_agent.py             Part 1: freight invoice vision extraction + storage
+  verification_agent.py         Part 2: trade-doc extraction, rule comparison, reply drafting
 data/
   seed_shipments.py             Generates the synthetic shipment dataset
-  generate_sample_invoices.py   Generates the 4 sample invoice PDFs
-  sample_invoices/*.pdf         Sample documents for the Document Agent demo
+  generate_sample_invoices.py   Generates the 4 sample freight invoice PDFs (Part 1)
+  generate_sample_trade_docs.py Generates the 2 sample SU trade-document PDFs (Part 2)
+  sample_invoices/*.pdf         Part 1 sample documents
+  sample_su_docs/*.pdf          Part 2 sample documents
 db/freight.db                   SQLite database (generated)
-PRD.docx / PRD.md               Deliverable 1
-sample_questions.md             Deliverable 2 requirement
-demo_script.md                  Deliverable 2 requirement
+PRD.docx / PRD.md               Part 1 PRD (Deliverable 1)
+PRD_Part2.pdf                   Part 2 PRD (max 1 page)
+sample_questions.md             Part 1 submission requirement
+demo_script.md                  Part 1 demo script
+demo_script_part2.md            Part 2 demo script
 ```
 
 ## Design notes / what to look at first
@@ -98,3 +112,40 @@ demo_script.md                  Deliverable 2 requirement
   bills of lading or packing lists.
 - Demo-mode NL understanding is keyword-matched, not general -- this is explicit and
   disclosed in the UI, not hidden.
+
+## Part 2 -- Agentic Document Verification (SU -> CG -> Customer)
+
+Part 2 applies Part 1's exact machinery to a real workflow described in the assignment: a
+Shipping Unit (SU) emails trade documents, a Cargo/Control Group (CG) validator manually checks
+every field against customer requirements today, and Part 2's job is to remove that manual
+reading, not the three-party structure.
+
+**What's new vs. Part 1** (everything else -- the DB, the guardrails, the mock/live client
+switch -- is reused as-is):
+
+- `agents/verification_agent.py` -- a mock inbox (`MOCK_INBOX`, 2 SU emails with real PDF
+  attachments), a per-customer rule profile (`CUSTOMER_RULES`), field comparison logic that
+  checks some fields against the rule profile and others (port of discharge, weight) directly
+  against the original Part 1 booking in `shipments` -- the booking *is* the requirement for
+  those fields -- and reply-email drafting via the same LLM client used in Part 1.
+- `verifications` table in `schema.sql`, registered in `sql_guard.py`'s table allowlist and in
+  `analytics_agent.py`'s schema description, so verification results are queryable from the
+  Analytics tab immediately (try: *"Show me all the SU document verifications that came back
+  with discrepancies"*).
+- A third Streamlit tab, "SU -> CG Verification," showing all four required states:
+  **Incoming** (mock inbox with a "Process with agent" trigger), **Verification Result**
+  (field-by-field match/mismatch/uncertain table with per-field confidence), **Discrepancy
+  Detail** (click any flagged field to expand found vs. expected), and **Draft Reply** (editable
+  text area; a human must click "CG: Approve & Send" -- the agent never sends on its own).
+
+**The two bundled scenarios** (both reference real shipments already in `shipments`, so the
+comparison against booking data is real, not staged):
+
+- `SU_TRADEDOC_GC-2026-00004.pdf` -- clean pass, every field matches -> approval draft.
+- `SU_TRADEDOC_GC-2026-00009.pdf` -- 4 deliberate mismatches (wrong consignee legal name, wrong
+  Incoterm, wrong port of discharge, weight outside tolerance) plus 1 low-confidence field
+  (goods description) that is surfaced as "uncertain" rather than silently passed -> amendment
+  draft listing each issue by field name, found value, and expected value.
+
+No extra setup is needed beyond the Part 1 quick start above -- `generate_sample_trade_docs.py`
+creates both PDFs, and the verification tab reads them directly from `data/sample_su_docs/`.

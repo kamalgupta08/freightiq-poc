@@ -42,6 +42,16 @@ point between document extraction and analytics):
   total_amount REAL, extraction_confidence REAL, low_confidence_fields TEXT,
   source_filename TEXT, extracted_at TEXT, reviewed_by_user INTEGER (0 or 1)
 
+TABLE verifications (one row per SU -> CG trade-document verification run,
+Part 2's Agentic Document Verification workflow -- populated when CG processes
+an incoming SU email through the verification agent):
+  verification_id TEXT, shipment_id TEXT (FK -> shipments.shipment_id, nullable),
+  su_sender TEXT, email_subject TEXT, document_filename TEXT,
+  overall_status TEXT ('clean'|'issues'), fields_checked INTEGER, fields_matched INTEGER,
+  fields_mismatched INTEGER, fields_uncertain INTEGER, field_results_json TEXT,
+  draft_email TEXT, final_email TEXT, cg_action TEXT ('pending'|'sent'),
+  created_at TEXT, sent_at TEXT
+
 Today's date for relative time questions: 2026-07-22.
 """
 
