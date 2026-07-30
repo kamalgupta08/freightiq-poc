@@ -261,11 +261,19 @@ def _last_user_text(messages):
 
 
 def _find_last_tool_result(messages):
-    for msg in reversed(messages):
-        if msg["role"] == "user" and isinstance(msg["content"], list):
-            for b in msg["content"]:
-                if isinstance(b, dict) and b.get("type") == "tool_result":
-                    return b
+    """Only the VERY LAST message can be a fresh tool_result belonging to
+    the current turn. Scanning further back (as an earlier version of this
+    function did) finds tool_results from PRIOR questions in the same
+    session -- since `messages` accumulates across the whole conversation
+    to support follow-up refinement -- and wrongly synthesizes an answer
+    from stale data instead of running new SQL for the new question."""
+    if not messages:
+        return None
+    last = messages[-1]
+    if last["role"] == "user" and isinstance(last["content"], list):
+        for b in last["content"]:
+            if isinstance(b, dict) and b.get("type") == "tool_result":
+                return b
     return None
 
 
